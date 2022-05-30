@@ -1,0 +1,257 @@
+---
+title: "Virome_library_QC"
+author: Caroline Sophie Wolters Petersen
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading libraries}
+#Load libraries
+library(tidyverse);packageVersion("tidyverse")
+library(cowplot);packageVersion("cowplot")
+library(ggpubr);packageVersion("ggpubr")
+library(readxl);packageVersion("readxl")
+library(rstatix);packageVersion("rstatix")
+library(ComplexHeatmap);packageVersion("ComplexHeatmap")
+library(ADImpute);packageVersion("ADImpute")
+library(phyloseq);packageVersion("phyloseq")
+library(psych);packageVersion("psych")
+library(vegan);packageVersion("vegan") 
+library(ape);packageVersion("ape") 
+library(ggrepel);packageVersion("ggrepel")
+
+```
+
+```{r Load data }
+qc.all <- read_excel("FastQC_Report.xlsx") 
+vOTUs <- read.csv("vOTU_raw.csv") %>% as.data.frame()
+meta.design <- read.csv("Metadata.csv")
+Vir_size <- read.csv("Contig_sizes.csv", sep = "\t")
+tax <- read.csv("vOTU_tax_nocontam.csv") %>% as.data.frame()
+```
+
+```{r Mean and standard deviation between protocols}
+#Remove wild samples for downstream analyses
+qc.all <- qc.all %>% filter(qc.all$Sample != "Wild") #removal of wild Atlantic salmon samples
+
+#Reads all RAW
+mean.raw <- mean(qc.all$Raw_sequences) # mean number the reads per sample = 4,270,918
+sd.raw <- sd(qc.all$Raw_sequences) # standard deviation of the reads per sample = 2,764,587
+
+#SSLR
+qc.sslr <- qc.all %>% filter(qc.all$Library == "SSLR") 
+
+mean.raw.SSLR <-  mean(qc.sslr$Raw_sequences) # mean number the reads per sample = 6,494,156
+sd.raw.SSLR <- sd(qc.sslr$Raw_sequences) # standard deviation of the reads per sample = 2,188,243
+
+#MDA
+qc.mda <- qc.all %>% filter(qc.all$Library == "MDA") 
+
+mean.raw.mda <-  mean(qc.mda$Raw_sequences) # mean number the reads per sample = 2,047,680
+sd.raw.mda <- sd(qc.mda$Raw_sequences) # standard deviation of the reads per sample = 765,585.3
+
+```
+
+```{r Statistic test raw}
+#Setting colour palette
+group_pal <- c("#e3aa74", "#ed828c", "#7bb6bd", "#74ade3", "#d5e6f6", "#eb9d9f")
+
+#Statistics test
+stat.test1 <- qc.all %>%
+  group_by("Library") %>%
+  rstatix::t_test(Raw_sequences ~ Library) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")  %>%
+  add_x_position(x = "Library", dodge = 0.8)  %>%
+  add_y_position()
+
+    # Create a box plot
+plot1 = ggboxplot(
+      qc.all, x = "Library", y = "Raw_sequences", 
+      color = "Library",
+      fill = "Library", palette = group_pal,
+      outlier.shape = 8, order = c("MDA", "SSLR"),
+      size = 0.5,
+      title = "")  + 
+      stat_pvalue_manual(
+        stat.test1,  label =  "T-test: {p.adj.signif}", tip.length = 0.045,
+        #step.increase = 0.09,
+        position = "identity") +
+  theme(legend.position= "none")
+        
+plot_raw = plot1 + xlab("Library protocol") + #changing labels
+  ylab("No. Sequences") +
+  ggtitle("Raw reads") +geom_jitter(alpha = 0.5, size=0.7)
+```
+
+```{r Statistics raw vs filtered}
+#Statistical test
+stat.test2 <- qc.all %>%
+  group_by("Library") %>%
+  rstatix::t_test(Filtered_Relative_To_Raw ~ Library) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj") %>%
+  add_x_position(x = "Library", dodge = 0.8) %>%
+  add_y_position()
+
+    # Create a box plot
+plot2 = ggboxplot(
+      qc.all, x = "Library", y = "Filtered_Relative_To_Raw", 
+      color = "Library",
+      fill = "Library", palette = group_pal,
+      outlier.shape = 8, order = c("MDA", "SSLR"),
+      size = 0.5,
+      title = "")  + 
+      stat_pvalue_manual(
+        stat.test2,  label =  "T-test: {p.adj.signif}", tip.length = 0.045,
+        #step.increase = 0.09,
+        position = "identity") +
+  theme(legend.position= "none")
+        
+plot_filtered = plot2 + xlab("Library protocol") + #changing labels
+  ylab("Fraction reads retained") +
+  ggtitle("After QC filtering") + 
+  geom_jitter(alpha = 0.5, size=0.7)
+
+```
+
+```{r Statistics raw vs assembled}
+#Statistical test
+stat.test3 <- qc.all %>%
+  group_by("Library") %>%
+  rstatix::t_test(Relative_Sum_of_vOTUs ~ Library) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj") %>%
+  add_x_position(x = "Library", dodge = 0.8) %>%
+  add_y_position()
+
+    # Create a box plot
+plot3 = ggboxplot(
+      qc.all, x = "Library", y = "Relative_Sum_of_vOTUs", 
+      color = "Library",
+      fill = "Library", palette = group_pal,
+      outlier.shape = 8, order = c("MDA", "SSLR"),
+      size = 0.5,
+      title = "")  + 
+      stat_pvalue_manual(
+        stat.test3,  label = "T-test: {p.adj.signif}", tip.length = 0.045,
+        #step.increase = 0.09,
+        position = "identity") +
+  theme(legend.position= "none")
+        
+plot_assem = plot3 + xlab("Library protocol") + #changing labels
+  ylab("Fraction reads retained") +
+  ggtitle("Reads mapping to assembly") + geom_jitter(alpha = 0.5, size=0.7)
+```
+
+Rarefaction curve showing the sequencing depth
+```{r plot QC boxplots, fig.height=8, fig.width=10}
+#pdf("Library SSLR vs MDA.pdf", height = 5, width = 10)
+cowplot::plot_grid(plot_raw,plot_filtered,plot_assem, nrow = 1, labels = 'AUTO') 
+#dev.off()
+```
+
+Barplot showing all reads including controls and excluding the SSLR library
+```{r}
+#Metadata setup
+rownames(meta.design) <- meta.design$Sample_name %>% as.matrix()
+
+#Setting rownames of decontamed-table
+rownames(vOTUs) <- vOTUs$X
+vOTUs <- vOTUs[,-1]
+
+#Setting rownames of decontamed-tax-table
+rownames(tax) <- tax$vOTU_ID
+tax.uni <- as.data.frame(tax)
+tax.uni <- tax.uni[,-1]
+```
+
+Rarecurve of reads (excluding SSLR)
+```{r}
+rarecurve(t(vOTUs), step = 500, col = "black", cex = 0.6, label = F, xlab = "Summed coverage", ylab ="Reads", main = "Rarefaction curve")
+
+```
+
+Normalisation of the reads using TPM 
+TPM (Transcripts per million) - it divides read counts by _length_ of each vOTU by kb - giving reads per kb. All these are counted together per sample and divided by 10^6. Now we have reads per million 
+```{r}
+# sort out vOTUs with missing taxa of vOTU size table
+### TMP normalisation
+Vir_size <- Vir_size[match(tax.uni$vOTU_ID,Vir_size$vOTU),]
+#identical(Vir_size$vOTU,rownames(vOTUs))
+
+colnames(Vir_size) <- c("hgnc_symbol", "transcript_length")
+
+vOTU.tmp <- NormalizeTPM(vOTUs, tr_length = Vir_size, scale = 10^6) # the scale is just a constant, which can be changed, i added a million, so the total sum for each sample i 1.
+
+```
+
+Bar plots showing absolute and relative abundance in all samples including controls
+```{r Phyloseq objects and barplots, fig.width=12, fig.height=6}
+#Non-normalised reads to show absolute abundance
+physeq.nn <- phyloseq(otu_table((vOTUs), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(tax.uni)),
+                             sample_data(meta.design))
+
+random_tree = rtree(ntaxa(physeq.nn), rooted=TRUE, tip.label=taxa_names(physeq.nn)) 
+
+physeq.nn <- merge_phyloseq(physeq.nn, random_tree)
+
+#Absolute abundance non-normalised
+plot_bar(physeq.nn, fill = "Order") +
+  ggtitle("Absolute abundance of all samples") +
+  theme_bw() +
+  facet_grid(scales = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Abundance true sampels vs control
+plot_bar(physeq.nn, fill = "Order") +
+  ggtitle("Absolute abundance of all samples vs control") +
+  theme_bw() +
+  facet_grid(~Sample_or_Control, scales = "free") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+#TMP normalised reads for showing relative abundance
+physeq.tmp <- phyloseq(otu_table((vOTU.tmp), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(tax.uni)),
+                             sample_data(meta.design))
+
+random_tree = rtree(ntaxa(physeq.tmp), rooted=TRUE, tip.label=taxa_names(physeq.tmp)) 
+
+physeq.tmp <- merge_phyloseq(physeq.tmp, random_tree)
+  
+#Plot of normalised data showing relative abundance
+plot_bar(physeq.tmp, fill = "Order") +
+  ggtitle("Normalised reads showing relative abundance of all samples") +
+  theme_bw() +
+  facet_grid(scales = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+Permutational multivariate analysis of variance analysis (PERMANOVA)
+```{r PERMANOVA}
+#True samples vs controls
+adonis2(t(as.data.frame(physeq.tmp@otu_table))~Sample_or_Control,data=as.data.frame(as.matrix(physeq.tmp@sam_data)),method="bray")
+
+#Sick vs healthy
+adonis <- adonis2(t(as.data.frame(physeq.tmp@otu_table))~Health_phenotype,data=as.data.frame(as.matrix(physeq.tmp@sam_data)),method="bray")
+
+#Sick vs. healthy dependent on tanks
+adonis2(t(as.data.frame(physeq.tmp@otu_table))~Health_phenotype*LetSea_Tank,data=as.data.frame(as.matrix(physeq.tmp@sam_data)),method="bray")
+
+#MDA vs SSLR protocol
+adonis2(t(as.data.frame(physeq.tmp@otu_table))~Library_method,data=as.data.frame(as.matrix(physeq.tmp@sam_data)),method="bray")
+
+
+```
+
+

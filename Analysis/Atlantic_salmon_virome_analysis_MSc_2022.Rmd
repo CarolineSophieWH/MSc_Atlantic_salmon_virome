@@ -1,0 +1,593 @@
+---
+title: "Atlantic_salmon_virome_analysis2022"
+author: Caroline Sophie Wolters Petersen
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The data has previously to this analysis been decontaminated using the R package 'Decontam', the vOTUs are based overlaps of vOTUs identified using Virster2 and Uniprot phage hits. The Taxonomy is based on BLAST against VOGs in NCBI.
+```{r Loading libraries and data, message = F}
+library(tidyverse);packageVersion("tidyverse")
+library(ape);packageVersion("ape")
+library(phyloseq);packageVersion("phyloseq") 
+library(survival);packageVersion("survival")
+library(Hmisc);packageVersion("Hmisc") 
+library(RColorBrewer);packageVersion("RColorBrewer") 
+library(ComplexHeatmap);packageVersion("ComplexHeatmap") 
+library(ggpubr);packageVersion("ggpubr") 
+library(ggrepel);packageVersion("ggrepel") 
+library(readxl);packageVersion("readxl") 
+library(ADImpute);packageVersion("ADImput") 
+library(DESeq2);packageVersion("DESeq2") 
+library(corrplot);packageVersion("corrplot")
+library(corrr);packageVersion("corrr") 
+library(cowplot);packageVersion("cowplot") 
+library(Matrix);packageVersion("Matrix") 
+library(psych);packageVersion("psych")
+library(forcats);packageVersion("forcats") 
+library(rstatix);packageVersion("rstatix")
+library(ggpmisc);packageVersion("ggpmisc") 
+library(vegan);packageVersion("vegan") 
+
+#vOTUs data
+vOTUs <- read.csv("vOTU_nocontam.csv") %>% as.data.frame()
+meta.design <- read.csv("Metadata.csv")
+Vir_size <- read.csv("Contig_sizes.csv", sep = "\t")
+tax <- read.csv("vOTU_tax_nocontam.csv") %>% as.data.frame()
+
+#16s rRNA data
+bacteria <- read.csv("Bozzi_OTUs.csv")
+vOTUs.bac <- read.csv("vOTU_OTU_samples.csv") %>% select(!"vOTU_13036") #removal of contaminant
+bac.tax <- read.csv("Bozzi_bacteria_taxonomy.csv")
+bac.meta <- read.csv("Bozzi_bacteria_metadata.csv")
+
+```
+
+Sorting data for downstream use
+```{r Sorting data}
+#Metadata setup
+rownames(meta.design) <- meta.design$Sample_name %>% as.matrix()
+meta.design <- meta.design %>% filter(meta.design$Library_method != "SSLR") #removing samples prepared using the SSLR library method.
+meta.design <- meta.design %>% filter(meta.design$Sample_or_Control != "Control Sample") #removing the control samples as the data is already cleaned using decontam
+meta.design <- meta.design %>% filter(meta.design$Life_condition == "Farmed")
+
+#Setting rownames of decontaminated table
+rownames(vOTUs) <- vOTUs$X
+vOTUs <- vOTUs %>% select(!c("Positive_control_MDA","Negative_control1", "Negative_control2", "Negative_control3")) #removing the control samples
+vOTUs <- vOTUs[,-1]
+
+#Setting rownames of decontamed-tax-table
+rownames(tax) <- tax$vOTU_ID
+tax.uni <- as.data.frame(tax)
+#tax.uni <- na.omit(tax.uni)
+tax.uni <- tax.uni[,-1]
+
+```
+
+
+Normalisation of the reads using TPM 
+TPM (Transcripts per million) - it divides read counts by _length_ of each vOTU by kb - giving reads per kb. All these are counted together per sample and divided by 10^6. Now we have reads per million.
+```{r Normalisation of data using TPM}
+# sort out vOTUs with missing taxa of vOTU size table
+#TMP normalisation
+Vir_size <- Vir_size[match(tax.uni$vOTU_ID,Vir_size$vOTU),]
+#identical(Vir_size$vOTU,rownames(vOTUs)) #to check that it overlaps
+
+colnames(Vir_size) <- c("hgnc_symbol", "transcript_length")
+
+vOTU.tmp <- NormalizeTPM(vOTUs, tr_length = Vir_size, scale = 10^6) # the scale is just a constant, which can be changed, i added a million, so the total sum for each sample i 1.
+colSums(vOTU.tmp) # check Sample sum
+
+```
+
+Phyloseq objects both non-normalised and normalised
+Non-normalized data phyloseq object for using in the differential abundance analysis
+```{r Phyloseq objects}
+#Non-normalised phyloseq object
+physeq.nn <- phyloseq(otu_table((vOTUs), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(tax.uni)),
+                             sample_data(meta.design))
+
+random_tree = rtree(ntaxa(physeq.nn), rooted=TRUE, tip.label=taxa_names(physeq.nn)) #For Unifrac
+
+physeq.nn <- merge_phyloseq(physeq.nn, random_tree)
+
+#Subsetting data
+physeq.nn <- subset_samples(physeq.nn, Life_condition == "Farmed")
+physeq.nn <- subset_samples(physeq.nn, Sample_name != "S02")
+
+#Normalised with TMP phyloseq object
+physeq.tmp <- phyloseq(otu_table((vOTU.tmp), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(tax.uni)),
+                             sample_data(meta.design))
+
+random_tree = rtree(ntaxa(physeq.tmp), rooted=TRUE, tip.label=taxa_names(physeq.tmp)) 
+
+physeq.tmp <- merge_phyloseq(physeq.tmp, random_tree)
+
+```
+
+#Subsetting samples:
+```{r, Farmed salmon }
+# Farmed
+physeqF.tmp <- subset_samples(physeq.tmp, Life_condition=="Farmed")
+physeqF.tmp <- subset_samples(physeqF.tmp, Sample_name != "S02") #removed due to failed virome extraction during library preparation.
+
+#Farmed phenotype sick
+physeq.sick <- subset_samples(physeqF.tmp, Health_phenotype=="Sick")
+
+#Farmed phenotype healthy
+physeq.healthy <- subset_samples(physeqF.tmp, Health_phenotype=="Healthy")
+
+```
+
+
+#Plotting the farmed salmon relative abundance barplot
+```{r Relative abundance plot, fig.height=12, fig.width=16 }
+#Color palette
+My_pal <- c("#E69F00", "#0072B2", "#56B4E9", "#009E73", "#F0E442", "#56B4E9", "#FFFCCC", "#CC79A7", "#E6AB02","#330066","#7570B3","#1B9E77","#666666", "#99CCFF", "#CCFF33", "#CC6633", "#99FFCC", "#66FFCC", "#0000CC", "#00CCCC", "#FFCC33", "#99FF99", "#FF6666", "#CC66FF", "#99CC00", "#99CC99", "#CCCC99", "#CCCC00", "#996699", "#9999FF", "#9966FF", "#FF9966")
+
+#Sick fish plot relative abundance
+p1 = plot_bar(physeq.sick, "Sample_name", fill = "Order") + 
+  geom_bar(aes(color=Order, fill=Order), stat="identity", position="stack") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust=1)) +
+  scale_fill_manual(values=My_pal) +
+  scale_color_manual(values=My_pal) +
+  labs(x = "Samples") +
+  labs(y = "Relative Abundance") +
+  ggtitle("Virome sick")
+
+#Healthy fish plot relative abundance
+p2 = plot_bar(physeq.healthy, "Sample_name", fill = "Order") + 
+  geom_bar(aes(color=Order, fill=Order), stat="identity", position="stack") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust =1)) +
+  scale_fill_manual(values=My_pal) +
+  scale_color_manual(values=My_pal) +
+  labs(x = "Samples") +
+  labs(y = "Relative Abundance") +
+  ggtitle("Virome healthy")
+
+#pdf("rel.abun.barplot.pdf", height = 6, width = 10)
+plot <- plot_grid(p1, p2, labels = 'AUTO', nrow = 2)
+plot
+#dev.off()
+
+  
+```
+
+CheckV piechart
+```{r CheckV pichart}
+#Pie chart plot
+ggplot(tax.uni, aes(x="", y=checkv_quality, fill=checkv_quality, color = checkv_quality)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme(legend.position="bottom") +
+   theme_void() +
+  scale_color_brewer() +
+  scale_fill_brewer() +
+  labs(fill = "CheckV Quality", color= "CheckV Quality")
+
+
+```
+
+_Diversity analysis_
+
+#Alpha diversity including statistical analysis
+```{r Alpha diversity}
+#Alpha diversity using Richness, Shannon and Simpson indices
+richness <- estimate_richness(physeq.nn, measures = c("Observed","Shannon", "Simpson"))
+md.richness <- meta.design[match(rownames(richness),meta.design$Sample_name),]
+richness <- cbind(md.richness, richness)
+
+plot_list <- list()
+for (i in c("Observed", "Shannon", "Simpson")){
+divtestdata <- data.frame(vOTU = richness[,i], Health_phenotype = richness$Health_phenotype)
+
+shapiro <- shapiro.test(divtestdata$vOTU)
+shapiro$p.value
+if (shapiro$p.value > 0.05) {
+  test <- c("TukeyHSD")
+  stat.test <- divtestdata %>%
+  group_by("Health_phenotype") %>%
+  rstatix::tukey_hsd(vOTU ~ Health_phenotype) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")
+} else {
+  test <- c("NP Dunn")
+  stat.test <- divtestdata %>%
+  group_by("v") %>%
+  dunn_test(vOTU ~ Health_phenotype) %>%
+  adjust_pvalue(method = "fdr") %>%
+  add_significance("p.adj")
+}
+
+stat.test$p.adj <- round(stat.test$p.adj,3)
+
+stat.test <- stat.test %>%
+  add_x_position(x = "Health_phenotype", dodge = 0.8) %>%
+  add_y_position()
+
+divtestdata$Health_phenotype <- factor(divtestdata$Health_phenotype, levels=c("Sick", "Healthy"))
+
+# Creating a box plot
+plot = ggboxplot(
+      divtestdata, x = "Health_phenotype", y = "vOTU", 
+      color = "black",
+      fill = "Health_phenotype",
+      outlier.shape = 8,
+      size = 0.5,
+      title = "")  + 
+      stat_pvalue_manual(
+        stat.test,  label = paste(test,": p.adj={p.adj}", sep = ""), tip.length = 0.05, label.size = 4,
+        step.increase = 0.01,
+        position = "identity") +
+  theme(text = element_text(size=12))
+
+plot = plot +
+  geom_boxplot(aes(col=Health_phenotype)) +
+  geom_point(aes(col=Health_phenotype), alpha =0.5) +
+  theme(strip.background = element_blank(), axis.text.x.bottom = element_text(angle = 60, hjust =1)) + 
+  ggtitle(i) +
+  xlab("Infection stage") +
+  ylab("Alpha diversity")
+
+
+plot_list[[i]] <- plot
+}
+
+```
+
+```{r Alpha diversity plot }
+#pdf("Alpha diversity.pdf", height=4, width=6)
+plot_list[[1]] <- plot_list[[1]] + theme(legend.position="none")
+plot_list[[3]] <- plot_list[[3]] + theme(legend.position="none")
+# Extract the legend. Returns a gtable
+legend_b <- get_legend(
+  plot_list[[2]] + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+plot_list[[2]] <- plot_list[[2]] + theme(legend.position="none")
+
+rich_plots <- cowplot::plot_grid(plot_list[[1]],plot_list[[2]],plot_list[[3]], labels = 'AUTO', nrow = 1)
+cowplot::plot_grid(rich_plots, legend_b, ncol = 1, rel_heights = c(0.9,0.1))
+
+#dev.off()
+```
+
+
+_BETA DIVERSITY_
+
+```{r PCoA, fig.height=16, fig.width=10 }
+#Making PCoA ordination using weighted Bray-Curtis dissimilarity matrix
+GP.ord <- ordinate(physeqF.tmp, "PCoA", "bray", weighted=TRUE)
+
+p1 = plot_ordination(physeqF.tmp, GP.ord, type="samples",
+                     color="Health_phenotype",
+                     title="PCoA 1, Bray-Curtis dissimilarity") + 
+  labs(color = "Infection stage") +
+   geom_text_repel(aes(label = Sample_name), size = 4, vjust = 0.7,
+             max.overlaps = 4,
+                      box.padding = unit(0.2, "lines"),
+                      point.padding = unit(0.2, "lines")) +
+  geom_point(size=3) +
+  theme_cowplot()
+
+p2 = plot_ordination(physeqF.tmp, GP.ord, axes=c(2,3), type="samples",
+                     color="Health_phenotype",
+                     title="PCoA 2, Bray-Curtis dissimilarity") + 
+  labs(color = "Infection stage") +
+   geom_text_repel(aes(label = Sample_name), size = 4, vjust = 0.7,
+             max.overlaps = 4,
+                      box.padding = unit(0.2, "lines"),
+                      point.padding = unit(0.2, "lines")) +
+  geom_point(size=3) +
+  theme_cowplot()
+
+
+
+#pdf("PCoA.pdf", height=12, width=10)
+PCoA <- plot_grid(p1, p2, labels = "AUTO", nrow = 2)
+PCoA
+#dev.off()
+
+```
+
+```{r PC3 plot}
+#Plot of only PC3 variance
+PC3_plot_data <- data.frame("PC3" = GP.ord$vectors[,3], "Health_phenotype" = physeqF.tmp@sam_data@.Data[[8]])
+
+#pdf("PC3.pdf", height=5, width=5)
+
+ggplot(data = PC3_plot_data, aes(x = Health_phenotype, y = PC3, color = Health_phenotype)) +
+  geom_point(alpha =0.6) + 
+    labs(color = "Health phenotype") +
+  geom_text_repel(aes(label = meta.design$Sample_name), size = 4, vjust = 0.7,
+             max.overlaps = 6,
+                      box.padding = unit(0.4, "lines"),
+                      point.padding = unit(0.4, "lines"))+ 
+    ggtitle("PC3 variance") +
+  xlab("Health phenotype") +
+  theme_cowplot() +
+  theme(text = element_text(size = 9)) +
+  theme(axis.text=element_text(size=8),
+         axis.title=element_text(size=9))
+
+#dev.off()
+
+```
+
+_Differential abudance analysis_
+
+```{r DEseq2, fig.height=8, fig.width=14, message=FALSE, warning=FALSE}
+#Differential abundance analysis using phyloseq_to_deseq2
+ps.taxa.pse <- physeq.nn
+otu_table(ps.taxa.pse) <- otu_table(physeq.nn) + 1
+# pairwise comparison sick and healthy
+ps.taxa.pse.sub <- subset_samples(ps.taxa.pse, Health_phenotype %in% c("Sick", "Healthy"))
+ds = phyloseq_to_deseq2(ps.taxa.pse.sub, ~ Health_phenotype)
+ds$Health_phenotype <- factor(ds$Health_phenotype, levels=c("Sick", "Healthy"))
+ds = DESeq(ds, test="Wald", fitType="parametric")
+res = results(ds, cooksCutoff = FALSE)
+alpha = 0.05
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps.taxa.pse)[rownames(sigtab), ], "matrix"))
+res = results(ds, alpha=alpha)
+res = res[order(res$padj, na.last=NA), ]
+taxa_sig = rownames(res[1:6, ]) # select bottom 6 with lowest p.adj values
+ps.taxa.rel <- transform_sample_counts(physeq.nn, function(x) x/sum(x)*100)
+ps.taxa.rel.sig <- prune_taxa(taxa_sig, ps.taxa.rel)
+ps.taxa.rel.sig <- prune_samples(colnames(otu_table(ps.taxa.pse.sub)), ps.taxa.rel.sig)
+matrix.top6 <- as.matrix(data.frame(otu_table(ps.taxa.rel.sig)))
+rownames(matrix.top6) <- as.character(tax_table(ps.taxa.rel.sig)[, "vOTU_ID"])
+metadata_sub <- data.frame(sample_data(ps.taxa.rel.sig))
+
+# Define the annotation color for columns and rows
+annotation_col = data.frame(
+    #"Sample type" = as.factor(metadata_sub$Sample_type), 
+    `Infection state` = as.factor(metadata_sub$Health_phenotype), 
+    check.names = FALSE
+)
+rownames(annotation_col) = rownames(metadata_sub) 
+
+annotation_row = data.frame(
+    Order = as.factor(tax_table(ps.taxa.rel.sig)[, "Order"])
+)
+rownames(annotation_row) = rownames(matrix.top6) 
+
+# Setting colors
+Order_col = RColorBrewer::brewer.pal(length(levels(annotation_row$Order)), "Paired")
+names(Order_col) = levels(annotation_row$Order)
+ann_colors = list(Health_phenotype = c(Sick = "blue", Healthy = "red"))
+
+#PLot the heatmap
+plot <- ComplexHeatmap::pheatmap(matrix.top6, scale= "row", 
+                         annotation_col = annotation_col, 
+                         annotation_row = annotation_row, 
+                         annotation_colors = ann_colors) 
+plot
+
+
+```
+
+
+###OTU VS VOTU####
+All the OTU data is from Davide Bozzi github https://github.com/DavideBozzi/Bozzi_et_al_2020_analysis. 20/20 of the healthy fish are the exact same samples, 13/20 of the sick fish are the exact same samples.
+
+Here we clean up data, to make it ready for correlations. 
+Including: 
+  - make both dataset continous (relative abundance)
+  - Remove low variant features (both OTUs and vOTUs)
+
+```{r clean up}
+# Clean up OTUs for oldschool approach
+OTU_names <- colnames(bacteria)
+OTU_names <- OTU_names[-1]# remove "sampleID"
+rownames(bacteria) <- bacteria[,1]
+bacteria <- bacteria[,-1]
+bacteria <- t(bacteria) # transpose
+
+#Making the data relative - bacteria
+bacteria.relative <- bacteria/colSums(bacteria)[col(bacteria)]
+
+#filter low variant OTUs out
+# First find the desired quantile breaks for the entire matrix
+qt <- quantile(bacteria.relative , probs = c(0.05,0.95) )
+
+#Taking out OTUs fall outside the qt breaks
+rows <- apply( bacteria.relative , 1 , function(x) any( x < qt[1] | x > qt[2] ) )
+#And subsetting on this vector
+bacteria.filtered <- bacteria.relative[ rows , ]
+
+#Name the OTU as taxa
+rownames(bac.tax) <- bac.tax$Column1
+test <- merge(bac.tax, bacteria.filtered, by = "row.names", sort=F)
+bac.tax <- test
+row.names(bac.tax) <- make.names(bac.tax$Family, unique=TRUE)
+row.names(bacteria.filtered) <- make.names(bac.tax$Family, unique=TRUE)
+
+# Clean up vOTUs
+vOTUs.bac <- t(vOTUs.bac)
+colnames(vOTUs.bac) <- vOTUs.bac[1,]
+vOTUs.bac <- vOTUs.bac[-1,]
+class(vOTUs.bac) <- "numeric"
+
+virus.relative <- vOTUs.bac/colSums(vOTUs.bac)[col(vOTUs.bac)]
+
+# filter low variant vOTUs out
+#  First find the desired quantile breaks for the entire matrix
+qt <- quantile(vOTUs.bac , probs = c(0.05,0.95) )
+
+#Taking out vOTUs fall outside the qt breaks
+rows <- apply(vOTUs.bac , 1 , function(x) any( x < qt[1] | x > qt[2] ) )
+vOTUs.filtered <- vOTUs.bac[ rows , ]
+```
+
+Start correlation of filtered data, which is 109 vOTUs and 17 OTUs
+Here we use a pairwise correlation with pearson, since it is the relation between two continous variables (aka. 0 to 1). 
+Furthermore, we use bonferroni correction to adjust for false positives. 
+```{r Correlate filtered data}
+# Correlate data 
+mat_data <- corr.test(t(vOTUs.filtered), t(bacteria.filtered), use = "pairwise",method="pearson",adjust="bonferroni", alpha=0.05,ci=T)
+p <- mat_data$p
+mat_data <- mat_data$r
+
+#Summarize correlations
+sum(table(mat_data[mat_data > 0.5])) 
+sum(table(mat_data[mat_data < -0.5])) 
+sum(table(p[p < 0.05]))
+```
+
+Order rows and columns (vOTUs and OTUs) based on hierarchical clustering (HCLUST), using a hacky method, since the matrix isn't equally squared
+```{r Order correlations based on HCLUST}
+#Ordering vOTUs based on HCLUST
+hclust.vOTUs <- hclust(dist(vOTUs.filtered))
+hclust.labels <- data.frame("labels"=hclust.vOTUs$labels, "order" =hclust.vOTUs$order)
+hclust.labels <- hclust.labels[order(hclust.labels[,2],decreasing=FALSE),]
+
+mat_data.ordered <- mat_data[match(hclust.labels$labels,rownames(mat_data)),]
+p.ordered <- p[match(hclust.labels$labels,rownames(p)),]
+
+#Ordering bacteria based on HCLUST
+hclust.bacteria <- hclust(dist(bacteria.filtered))
+hclust.labels <- data.frame("labels"=hclust.bacteria$labels, "order" =hclust.bacteria$order)
+hclust.labels <- hclust.labels[order(hclust.labels[,2],decreasing=FALSE),]
+
+mat_data.ordered <- t(mat_data.ordered)
+mat_data.ordered <- mat_data.ordered[match(hclust.labels$labels,rownames(mat_data.ordered)),]
+p.ordered <- t(p.ordered)
+p.ordered <- p.ordered[match(hclust.labels$labels,rownames(p.ordered)),]
+mat_data.ordered <- t(mat_data.ordered)
+p.ordered <- t(p.ordered)
+```
+
+Correlation plot with added significance asterix for correlations with p.adj. below 0.05.
+```{r Plot Correlations, fig.height=22, fig.width=10}
+#Filter out non-significant correlations
+p.ordered.filtered <- p.ordered[p.ordered[,1]<0.05 | p.ordered[,2]<0.05,]
+mat_data.ordered.filtered <- mat_data.ordered[match(rownames(p.ordered.filtered), rownames(mat_data.ordered)),]
+
+#Correlation plot all
+corrplot_all <- corrplot(mat_data.ordered,p.mat = p.ordered, method="color",
+                    tl.cex = 0.55, sig.level = c(0.05), insig = "label_sig",
+                    pch.cex = .5, pch.col = "white", is.corr = FALSE)
+
+#Correlation OTU1 and OTU2
+corrplot_sig <- corrplot(mat_data.ordered.filtered,p.mat = p.ordered.filtered, method="color",
+                    tl.cex = 0.55, sig.level = c(0.05), insig = "label_sig",
+                    pch.cex = .5, pch.col = "white", is.corr = FALSE) +
+  theme(strip.background = element_blank(), axis.text.x.top = element_text(angle = 60, vjust = 0.5, hjust =1))  
+
+
+corrplot_sig
+
+```
+
+Bacterial phyloseq and alpha diversity analysis
+```{r}
+#bacteria <- read.csv("~/Desktop/Speciale/Bioinformatic/Caro_VIR_Results/otu_samples_onlyoverlap.csv")
+bac.tax <- read.csv("~/Desktop/Bozzi_et_al_2020_analysis/Davide_OTUs_Taxonomy.csv")
+#remove any samples that don't overlap with
+bac.meta <- bac.meta %>% filter(bac.meta$Sample_name !="")
+
+rownames(bac.meta) <- bac.meta$Sample_name
+
+rownames(bac.tax) <- bac.tax[,1]
+bac.tax <- bac.tax[,-1]
+bac.tax <- bac.tax[match(rownames(bacteria),rownames(bac.tax)),]
+bacteria <- bacteria[match(rownames(bac.tax),rownames(bacteria)),]
+identical(rownames(bac.tax),rownames(bacteria))
+
+#phyloseq object of bacteria in overlapping samples
+
+physeq.bac <- phyloseq(otu_table((bacteria), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(bac.tax)),
+                             sample_data(bac.meta))
+
+
+#Making a tree to infer the tax diversity for Unifrac distances
+random_tree = rtree(ntaxa(physeq.bac), rooted=TRUE, tip.label=taxa_names(physeq.bac)) 
+
+physeq.bac <- merge_phyloseq(physeq.bac, random_tree)
+
+```
+
+Virome-microbiota correlation
+```{r vir - bac correlation, fig.height=6, fig.width=12, message =F, error = F}
+#Viral diversity estimates
+richness.bac <- estimate_richness(physeq.bac, measures = c("Observed","Shannon", "Simpson"))
+md.bac.richness <- bac.meta[match(rownames(richness.bac),bac.meta$Sample_name),]
+richness.bac <- cbind(md.bac.richness, richness.bac)
+richness.vir <- estimate_richness(physeq.nn, measures = c("Observed","Shannon", "Simpson"))
+richness.vir <- richness.vir[match(md.bac.richness$Sample_name, rownames(richness.vir)),]
+richness.corr <- data.frame("Sample_Name" = md.bac.richness$Sample_name, "Obs_vir" = richness.vir$Observed, "Obs_bac" = richness.bac$Observed,"Shannon_vir" = richness.vir$Shannon, "Shannon_bac" = richness.bac$Shannon, "Simpson_vir" = richness.vir$Simpson, "Simpson_bac" = richness.bac$Simpson, "Healt_status" = md.bac.richness$Health_status)
+
+my.formula <- y ~ x #to add statistics
+
+# Make plots
+Observed.corr.plot <- ggplot(richness.corr, aes(x=Obs_vir, y=Obs_bac)) +
+  xlab("Observed vOTUs")+ 
+  ylab("OBserved OTUs") +
+  geom_point(color='Black', size = 3, alpha = 0.5) +
+  stat_fit_glance(method = "lm", label.x="right", label.y="bottom",
+                        method.args = list(formula = my.formula),
+                        aes(label = sprintf('R^2~"="~%.3f~~italic(p)~"="~%.2f',
+                                            stat(..r.squared..),stat(..p.value..))),
+                        parse = TRUE) +
+  geom_smooth(method=lm, se=T, fullrange=TRUE, color='#2C3E50', fill = "papayawhip") +
+  theme_bw(base_size = 15) + facet_wrap(~Healt_status)  +
+   geom_text_repel(aes(label = Sample_Name), size = 4, vjust = 0.7,
+             max.overlaps = 4,
+                      box.padding = unit(0.2, "lines"),
+                      point.padding = unit(0.2, "lines")) +
+  geom_point(size=3)
+
+Shannon.corr.plot <- ggplot(richness.corr, aes(x=Shannon_vir, y=Shannon_bac)) +
+  xlab("Shannon vOTUs")+ 
+  ylab("Shannon OTUs") +
+  geom_point(color='Black', size = 3, alpha = 0.5) +
+  stat_fit_glance(method = "lm", label.x="right", label.y="bottom",
+                        method.args = list(formula = my.formula),
+                        aes(label = sprintf('R^2~"="~%.3f~~italic(p)~"="~%.2f',
+                                            stat(..r.squared..),stat(..p.value..))),
+                        parse = TRUE) +
+  geom_smooth(method=lm, se=T, fullrange=TRUE, color='#2C3E50', fill = "papayawhip") +
+  theme_bw(base_size = 15) + facet_wrap(~Healt_status)  +
+   geom_text_repel(aes(label = Sample_Name), size = 4, vjust = 0.7,
+             max.overlaps = 4,
+                      box.padding = unit(0.2, "lines"),
+                      point.padding = unit(0.2, "lines")) +
+  geom_point(size=3)
+
+
+#pdf("Simpsons_corr.pdf", height=4, width=6)
+Simpson.corr.plot <- ggplot(richness.corr, aes(x=Simpson_vir, y=Simpson_bac)) +
+  xlab("Alpha diversity viromes")+ 
+  ylab("Alpha diversity microbiome") +
+  stat_fit_glance(method = "lm", label.x="right", label.y="bottom",
+                        method.args = list(formula = my.formula),
+                        aes(label = sprintf('R^2~"="~%.3f~~italic(p)~"="~%.2f',
+                                            stat(..r.squared..),stat(..p.value..))),
+                        parse = TRUE) +
+  geom_smooth(method=lm, se=T, fullrange=TRUE, color='#2C3E50', fill = "papayawhip") +
+  theme_bw(base_size = 15) + 
+  facet_wrap(~Healt_status, scales = "free_y") +
+   geom_text_repel(aes(label = Sample_Name), size = 4, vjust = 0.7,
+             max.overlaps = 4,
+                      box.padding = unit(0.2, "lines"),
+                      point.padding = unit(0.2, "lines")) +
+  geom_point(color='Black', size = 3, alpha = 0.5)
+#Simpson.corr.plot
+#dev.off()
+
+#all plots
+cowplot::plot_grid(Observed.corr.plot, Shannon.corr.plot, Simpson.corr.plot, label='AUTO')
+```

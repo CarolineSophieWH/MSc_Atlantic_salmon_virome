@@ -1,0 +1,125 @@
+---
+title: "Decontamination of viromes Atlantic salmon 2022"
+author: Caroline Sophie Wolters Petersen
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries and data loading}
+#Load libraries
+library(tidyverse)
+library(vegan)
+library(decontam)
+library(phyloseq)
+
+#Load datasets
+phage_uniprot <- read.csv("vOTU_w_Uniprot_hit.csv")
+raw.vOTUs <- read.csv("vOTU_raw.csv") %>% as.data.frame()
+meta.design <- read.csv("Metadata.csv")
+Vir_size <- read.csv("Contig_sizes.csv", sep = "\t")
+raw.tax <- read.csv("Viral_taxonomy.csv") %>% as.data.frame()
+
+```
+
+First filter vOTU table to only keep vOTUs with a consensus finding between NCBI and Uniprot identified proteins in it. The wild samples are included in the contamination identification as vOTUs and potential contaminants are produce during the lab work which were all done at the same time.
+```{r}
+#Study design setup
+rownames(meta.design) <- meta.design$Sample_name %>% as.matrix()
+meta.design <- meta.design %>% filter(meta.design$Library_method != "SSLR")#removing samples prepared using the SSLR library method.
+
+#Setting up data and sorting vOTUs based on Uniprot phage protein hits
+rownames(phage_uniprot) <- phage_uniprot$otu %>% as.matrix()
+
+#Sort taxnames of vOTUs
+rownames(raw.tax) <- raw.tax$vOTU_ID
+tax.uni <- raw.tax[match(rownames(phage_uniprot), raw.tax$vOTU_ID),]
+tax.uni <- as.data.frame(tax.uni)
+tax.uni <- na.omit(tax.uni)
+
+
+#vOTU rownames
+rownames(raw.vOTUs) <- raw.vOTUs$vOTU
+raw.vOTUs <- raw.vOTUs[,-1]
+
+#Kepp only vOTUs that had a Uniprot phage hit
+vOTUs.uni <- raw.vOTUs[match(tax.uni$vOTU_ID, rownames(raw.vOTUs)),]
+
+
+#head(vOTUs.filt.tax) 
+identical(rownames(tax.uni),rownames(vOTUs.uni))
+
+```
+
+_DECONTAM_
+First we use the decontam frequency approach which is based on the qubit measurements
+```{r}
+ps <- phyloseq(otu_table((vOTUs.uni), taxa_are_rows = TRUE),
+                             tax_table(as.matrix(tax.uni)),
+                             sample_data(meta.design))
+
+
+df <- as.data.frame(sample_data(ps)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+
+ggplot(df, aes(Index, LibrarySize, color=Sample_or_Control)) +
+  geom_point()
+
+#Identifying the contaminants
+contamdf.freq <- isContaminant(ps, method="frequency", conc="quant_reading")
+head(contamdf.freq)
+
+
+#To check if any of the vOTUs are classified as contaminants
+table(contamdf.freq$contaminant)
+
+```
+
+Using the prevalence approach to check contaminants
+```{r}
+#The prevalence method has here a threshold of threshold=0.1
+sample_data(ps)$is.neg <- sample_data(ps)$Sample_or_Control == "Control Sample"
+contamdf.prev <- isContaminant(ps, method="prevalence", neg="is.neg")
+table(contamdf.prev$contaminant)
+
+#As 73 of the 393 sampels were found to be contaminants, we look into which ones:
+head(which(contamdf.prev$contaminant))
+
+```
+
+To check overlap, we will try to use a combination of the frequency and prevalence methods:
+```{r Comnination of prevalence and frequency method, Decontam}
+conc <- c(meta.design$quant_reading)
+neg <- c(F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,F,T,T,T,T)
+
+IsContam <- isContaminant(ps, conc = conc, neg = neg, method = "both",
+  threshold =0.5)
+
+table(IsContam$contaminant)
+```
+
+#To sort out the taxa and non contaminats from the contaminants
+```{r}
+tax_prev_contam <- as.data.frame(tax.uni[row.names(contamdf.prev[which(contamdf.prev$contaminant),]),
+            c("Class","Family","Genus")])
+
+#filter out the contaminants and write tables
+ps.filt.prev <- prune_taxa(!contamdf.prev$contaminant,ps)
+
+
+#make new vOTU table without the contaminants
+write.table(ps.filt.prev@otu_table,"vOTU_nocontam.csv",sep=",", quote=F, col.names=NA)
+
+#Save non contaminant taxa table
+write.table(ps.filt.prev@tax_table,"vOTU_tax_nocontam.csv",sep=",", quote=F, col.names=NA)
+
+#Save contaminants in new table
+write.table(tax_prev_contam, "contamination_taxa.csv",sep=",", quote=F, col.names=NA)
+
+```
