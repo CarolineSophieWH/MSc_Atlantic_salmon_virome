@@ -8,6 +8,7 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
 ```
 
 The data has previously to this analysis been decontaminated using the R package 'Decontam', the vOTUs are based overlaps of vOTUs identified using Virster2 and Uniprot phage hits. The Taxonomy is based on BLAST against VOGs in NCBI.
@@ -22,7 +23,7 @@ library(ComplexHeatmap);packageVersion("ComplexHeatmap")
 library(ggpubr);packageVersion("ggpubr") 
 library(ggrepel);packageVersion("ggrepel") 
 library(readxl);packageVersion("readxl") 
-library(ADImpute);packageVersion("ADImput") 
+library(ADImpute);packageVersion("ADImpute") 
 library(DESeq2);packageVersion("DESeq2") 
 library(corrplot);packageVersion("corrplot")
 library(corrr);packageVersion("corrr") 
@@ -34,17 +35,19 @@ library(rstatix);packageVersion("rstatix")
 library(ggpmisc);packageVersion("ggpmisc") 
 library(vegan);packageVersion("vegan") 
 
+setwd("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data")
+
 #vOTUs data
-vOTUs <- read.csv("vOTU_nocontam.csv") %>% as.data.frame()
-meta.design <- read.csv("Metadata.csv")
-Vir_size <- read.csv("Contig_sizes.csv", sep = "\t")
-tax <- read.csv("vOTU_tax_nocontam.csv") %>% as.data.frame()
+vOTUs <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/vOTU_nocontam.csv") %>% as.data.frame()
+meta.design <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Metadata.csv")
+Vir_size <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Contig_sizes.csv", sep = ",")
+tax <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/vOTU_tax_nocontam.csv") %>% as.data.frame()
 
 #16s rRNA data
-bacteria <- read.csv("Bozzi_OTUs.csv")
-vOTUs.bac <- read.csv("vOTU_OTU_samples.csv") %>% select(!"vOTU_13036") #removal of contaminant
-bac.tax <- read.csv("Bozzi_bacteria_taxonomy.csv")
-bac.meta <- read.csv("Bozzi_bacteria_metadata.csv")
+bacteria <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Bozzi_OTUs.csv")
+vOTUs.bac <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/vOTU_OTU_samples.csv") %>% select(!"vOTU_13036") #removal of contaminant
+bac.tax <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Bozzi_bacteria_taxonomy.csv")
+bac.meta <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Bozzi_bacteria_metadata.csv")
 
 ```
 
@@ -76,7 +79,7 @@ TPM (Transcripts per million) - it divides read counts by _length_ of each vOTU 
 # sort out vOTUs with missing taxa of vOTU size table
 #TMP normalisation
 Vir_size <- Vir_size[match(tax.uni$vOTU_ID,Vir_size$vOTU),]
-#identical(Vir_size$vOTU,rownames(vOTUs)) #to check that it overlaps
+identical(Vir_size$vOTU,rownames(vOTUs)) #to check that it overlaps
 
 colnames(Vir_size) <- c("hgnc_symbol", "transcript_length")
 
@@ -245,7 +248,7 @@ plot_list[[i]] <- plot
 ```
 
 ```{r Alpha diversity plot }
-#pdf("Alpha diversity.pdf", height=4, width=6)
+#pdf("Alpha diversity.pdf", height=6, width=8)
 plot_list[[1]] <- plot_list[[1]] + theme(legend.position="none")
 plot_list[[3]] <- plot_list[[3]] + theme(legend.position="none")
 # Extract the legend. Returns a gtable
@@ -305,7 +308,7 @@ PCoA
 #Plot of only PC3 variance
 PC3_plot_data <- data.frame("PC3" = GP.ord$vectors[,3], "Health_phenotype" = physeqF.tmp@sam_data@.Data[[8]])
 
-#pdf("PC3.pdf", height=5, width=5)
+pdf("PC3.pdf", height=5, width=5)
 
 ggplot(data = PC3_plot_data, aes(x = Health_phenotype, y = PC3, color = Health_phenotype)) +
   geom_point(alpha =0.6) + 
@@ -321,7 +324,7 @@ ggplot(data = PC3_plot_data, aes(x = Health_phenotype, y = PC3, color = Health_p
   theme(axis.text=element_text(size=8),
          axis.title=element_text(size=9))
 
-#dev.off()
+dev.off()
 
 ```
 
@@ -494,7 +497,7 @@ corrplot_sig
 Bacterial phyloseq and alpha diversity analysis
 ```{r}
 #bacteria <- read.csv("~/Desktop/Speciale/Bioinformatic/Caro_VIR_Results/otu_samples_onlyoverlap.csv")
-bac.tax <- read.csv("~/Desktop/Bozzi_et_al_2020_analysis/Davide_OTUs_Taxonomy.csv")
+bac.tax <- read.csv("~/Documents/GitHub/MSc_Atlantic_salmon_virome/Data/Bozzi_bacteria_taxonomy.csv")
 #remove any samples that don't overlap with
 bac.meta <- bac.meta %>% filter(bac.meta$Sample_name !="")
 
@@ -568,7 +571,7 @@ Shannon.corr.plot <- ggplot(richness.corr, aes(x=Shannon_vir, y=Shannon_bac)) +
   geom_point(size=3)
 
 
-#pdf("Simpsons_corr.pdf", height=4, width=6)
+pdf("Simpsons_corr.pdf", height=6, width=8)
 Simpson.corr.plot <- ggplot(richness.corr, aes(x=Simpson_vir, y=Simpson_bac)) +
   xlab("Alpha diversity viromes")+ 
   ylab("Alpha diversity microbiome") +
@@ -585,9 +588,11 @@ Simpson.corr.plot <- ggplot(richness.corr, aes(x=Simpson_vir, y=Simpson_bac)) +
                       box.padding = unit(0.2, "lines"),
                       point.padding = unit(0.2, "lines")) +
   geom_point(color='Black', size = 3, alpha = 0.5)
-#Simpson.corr.plot
-#dev.off()
+Simpson.corr.plot
+dev.off()
 
 #all plots
 cowplot::plot_grid(Observed.corr.plot, Shannon.corr.plot, Simpson.corr.plot, label='AUTO')
 ```
+
+
